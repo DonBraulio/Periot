@@ -1,18 +1,25 @@
 #include <Arduino.h>
 
-// put function declarations here:
-int myFunction(int, int);
+#define TEST_PIN 2  // Cambiar por el GPIO que quieras usar
 
 void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+  pinMode(TEST_PIN, OUTPUT);
+
+  delay(2000);
+  Serial.begin(115200);
+  delay(500);
+  Serial.println();
+  Serial.println("Serial OK");
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-}
+  Serial.print("Uptime: ");
+  Serial.print(millis());
+  Serial.println(" ms");
 
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+  digitalWrite(TEST_PIN, HIGH);
+  delay(500);
+
+  digitalWrite(TEST_PIN, LOW);
+  delay(100);
 }
