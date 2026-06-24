@@ -1,12 +1,14 @@
 #include <Arduino.h>
 
+#define LED_PIN 4
+
 void setup() {
-  pinMode(1, OUTPUT);  // P1 suele tener LED onboard en Digispark
+  pinMode(LED_PIN, OUTPUT);  // P1 suele tener LED onboard en Digispark
 }
 
 void loop() {
-  digitalWrite(1, HIGH);
-  delay(500);
-  digitalWrite(1, LOW);
+  digitalWrite(LED_PIN, HIGH);
+  delay(1000);
+  digitalWrite(LED_PIN, LOW);
   delay(500);
 }
