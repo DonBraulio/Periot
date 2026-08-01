@@ -4,6 +4,7 @@
 constexpr uint8_t ENC_A_PIN = 3;
 constexpr uint8_t ENC_B_PIN = 4;
 constexpr uint8_t LED_PIN = 0;
+constexpr uint8_t RF_TX_PIN = 1;
 
 int8_t encoderAccum = 0;
 uint8_t lastState = 0;
@@ -11,8 +12,6 @@ uint8_t lastState = 0;
 uint8_t readEncoderState() {
   uint8_t a = digitalRead(ENC_A_PIN);
   uint8_t b = digitalRead(ENC_B_PIN);
-
-  // Two-bit encoder state: AB
   return (a << 1) | b;
 }
 
@@ -25,12 +24,39 @@ void flashLed(uint8_t times) {
   }
 }
 
+void sendRfTestBurst(uint8_t pulses) {
+  // Send a simple visible pulse train for Saleae validation.
+  // This is not a robust RF protocol yet.
+  for (uint8_t i = 0; i < pulses; i++) {
+    digitalWrite(RF_TX_PIN, HIGH);
+    delayMicroseconds(500);
+    digitalWrite(RF_TX_PIN, LOW);
+    delayMicroseconds(500);
+  }
+
+  // Leave transmitter data input low when idle.
+  digitalWrite(RF_TX_PIN, LOW);
+}
+
+void handleEncoderStep(int8_t direction) {
+  if (direction > 0) {
+    flashLed(1);
+    sendRfTestBurst(10);
+  } else {
+    flashLed(2);
+    sendRfTestBurst(20);
+  }
+}
+
 void setup() {
   pinMode(ENC_A_PIN, INPUT_PULLUP);
   pinMode(ENC_B_PIN, INPUT_PULLUP);
+
   pinMode(LED_PIN, OUTPUT);
+  pinMode(RF_TX_PIN, OUTPUT);
 
   digitalWrite(LED_PIN, LOW);
+  digitalWrite(RF_TX_PIN, LOW);
 
   lastState = readEncoderState();
 }
@@ -41,8 +67,6 @@ void loop() {
   if (currentState != lastState) {
     uint8_t transition = (lastState << 2) | currentState;
 
-    // Quadrature transition table.
-    // Valid transitions increment or decrement depending on rotation direction.
     switch (transition) {
       case 0b1110:
       case 0b1000:
@@ -59,7 +83,6 @@ void loop() {
         break;
 
       default:
-        // Invalid transition, likely caused by contact bounce.
         break;
     }
 
@@ -67,16 +90,12 @@ void loop() {
 
     if (encoderAccum >= 4) {
       encoderAccum = 0;
-
-      // Later this will send a relative +1 RF message.
-      flashLed(1);
+      handleEncoderStep(+1);
     }
 
     if (encoderAccum <= -4) {
       encoderAccum = 0;
-
-      // Later this will send a relative -1 RF message.
-      flashLed(2);
+      handleEncoderStep(-1);
     }
   }
 }
