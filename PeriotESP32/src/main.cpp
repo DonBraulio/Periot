@@ -1,12 +1,18 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <wiz_control.h>
 
 #define WIFI_CHECK_PERIOD 5000
 #define TEST_PIN 2
+#define MAC_LAMP_LIVING "D8A011E712FD"
 
 const char* WIFI_SSID = "Peru";
 const char* WIFI_PASSWORD = "BM875301";
 unsigned long lastWifiCheck = 0;
+
+std::vector<String> targetWizMacs = {MAC_LAMP_LIVING};
+
+WizIpMap wizLights;
 
 void setupWIFI(int maxRetry) {
   Serial.println();
@@ -41,17 +47,19 @@ void setupWIFI(int maxRetry) {
   }
 }
 
-void wifiCheck() {
+bool wifiReconnect() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("WiFi Connected -> IP: ");
     Serial.print(WiFi.localIP());
     Serial.print(" | RSSI: ");
     Serial.print(WiFi.RSSI());
     Serial.println(" dBm");
+    return false;
   } else {
     Serial.println("WiFi disconnected. Retrying...");
     WiFi.disconnect();
     setupWIFI(30);
+    return true;
   }
 }
 
@@ -68,7 +76,17 @@ void setup() {
 void loop() {
   if ((millis() - lastWifiCheck) >= WIFI_CHECK_PERIOD) {
     lastWifiCheck = millis();
-    wifiCheck();
+    if (wifiReconnect() && WiFi.status() == WL_CONNECTED) {
+      wizLights = getWizIPs(targetWizMacs);
+    }
+
+    for (const auto& entry : wizLights) {
+      IPAddress ip = entry.second;
+      for (int intensity = 0; intensity < 100; intensity += 25) {
+        setWizWarm(intensity, ip);
+        delay(100);
+      }
+    }
   }
 
   Serial.print("Uptime: ");
