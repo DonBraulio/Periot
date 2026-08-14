@@ -1,13 +1,17 @@
 #include <Arduino.h>
 
+#include "rf_protocol.h"
+
 // Note: PB0, 1 and 2 -> MOSI/MISO/SCK
 constexpr uint8_t ENC_A_PIN = 3;
 constexpr uint8_t ENC_B_PIN = 4;
 constexpr uint8_t LED_PIN = 0;
 constexpr uint8_t RF_TX_PIN = 1;
+constexpr uint8_t NODE_ID = 1;
 
 int8_t encoderAccum = 0;
 uint8_t lastState = 0;
+uint8_t sequence = 0;
 
 uint8_t readEncoderState() {
   uint8_t a = digitalRead(ENC_A_PIN);
@@ -24,28 +28,12 @@ void flashLed(uint8_t times) {
   }
 }
 
-void sendRfTestBurst(uint8_t pulses) {
-  // Send a simple visible pulse train for Saleae validation.
-  // This is not a robust RF protocol yet.
-  for (uint8_t i = 0; i < pulses; i++) {
-    digitalWrite(RF_TX_PIN, HIGH);
-    delayMicroseconds(500);
-    digitalWrite(RF_TX_PIN, LOW);
-    delayMicroseconds(500);
-  }
-
-  // Leave transmitter data input low when idle.
-  digitalWrite(RF_TX_PIN, LOW);
-}
-
 void handleEncoderStep(int8_t direction) {
-  if (direction > 0) {
-    flashLed(1);
-    sendRfTestBurst(10);
-  } else {
-    flashLed(2);
-    sendRfTestBurst(20);
-  }
+  RfFrame frame = createRfFrame(NODE_ID, direction, sequence);
+  sendRfFrame(RF_TX_PIN, frame);
+  sequence = (sequence + 1) & 0x03;
+
+  flashLed(direction > 0 ? 1 : 2);
 }
 
 void setup() {
