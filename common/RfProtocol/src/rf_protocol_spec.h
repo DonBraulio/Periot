@@ -7,7 +7,8 @@ namespace RfProtocolSpec {
 // Nominal wire timings. The receiver defines wider acceptance windows.
 constexpr uint8_t PREAMBLE_CYCLES = 16;
 constexpr uint8_t MIN_RECEIVED_PREAMBLE_CYCLES = 12;
-constexpr uint8_t PAYLOAD_BITS = 10;
+constexpr uint8_t PAYLOAD_BITS = 18;
+constexpr uint8_t DATA_BITS = 14;
 
 constexpr uint16_t MARK_US = 400;
 constexpr uint16_t ZERO_SPACE_US = 400;
@@ -15,52 +16,67 @@ constexpr uint16_t ONE_SPACE_US = 1200;
 constexpr uint16_t SYNC_SPACE_US = 3000;
 constexpr uint16_t STOP_MARK_US = 400;
 
-constexpr uint8_t NODE_SHIFT = 6;
-constexpr uint8_t DIRECTION_SHIFT = 5;
-constexpr uint8_t SEQUENCE_SHIFT = 3;
+constexpr uint8_t NODE_SHIFT = 14;
+constexpr uint8_t BOOT_ID_SHIFT = 12;
+constexpr uint8_t POSITION_SHIFT = 4;
+constexpr uint32_t CRC_MASK = 0x0F;
 
 struct Frame {
   uint8_t nodeId;
-  int8_t direction;
-  uint8_t sequence;
-  uint16_t payload;
+  uint8_t bootId;
+  uint8_t position;
+  uint32_t payload;
 };
 
-inline uint8_t calculateChecksum(uint8_t nodeId, uint8_t directionBit,
-                                 uint8_t sequence) {
-  return (nodeId ^ (directionBit << 1) ^ (sequence << 2) ^ 0b101) & 0x07;
+// CRC-4/ITU polynomial: x^4 + x + 1.
+inline uint8_t calculateCrc(uint16_t data) {
+  uint8_t crc = 0;
+
+  for (int8_t bit = DATA_BITS - 1; bit >= 0; --bit) {
+    const bool inputBit = (data >> bit) & 0x01;
+    const bool feedback = ((crc >> 3) & 0x01) ^ inputBit;
+    crc = (crc << 1) & CRC_MASK;
+    if (feedback) {
+      crc ^= 0x03;
+    }
+  }
+
+  return crc;
 }
 
-inline Frame createFrame(uint8_t nodeId, int8_t direction, uint8_t sequence) {
+inline Frame createFrame(uint8_t nodeId, uint8_t bootId,
+                         uint8_t position) {
   const uint8_t normalizedNodeId = nodeId & 0x0F;
-  const uint8_t directionBit = direction > 0 ? 1 : 0;
-  const uint8_t normalizedSequence = sequence & 0x03;
-  const int8_t normalizedDirection = directionBit ? int8_t{1} : int8_t{-1};
-  const uint8_t checksum = calculateChecksum(
-      normalizedNodeId, directionBit, normalizedSequence);
+  const uint8_t normalizedBootId = bootId & 0x03;
+  const uint16_t data = (normalizedNodeId << 10) |
+                        (normalizedBootId << 8) | position;
+  const uint32_t payload = (static_cast<uint32_t>(data) << 4) |
+                           calculateCrc(data);
 
-  const uint16_t payload =
-      (normalizedNodeId << NODE_SHIFT) |
-      (directionBit << DIRECTION_SHIFT) |
-      (normalizedSequence << SEQUENCE_SHIFT) | checksum;
-
-  return {normalizedNodeId, normalizedDirection, normalizedSequence, payload};
+  return {normalizedNodeId, normalizedBootId, position, payload};
 }
 
-inline bool parseFrame(uint16_t payload, Frame& frame) {
-  const uint8_t nodeId = (payload >> NODE_SHIFT) & 0x0F;
-  const uint8_t directionBit = (payload >> DIRECTION_SHIFT) & 0x01;
-  const uint8_t sequence = (payload >> SEQUENCE_SHIFT) & 0x03;
-  const uint8_t receivedChecksum = payload & 0x07;
+inline bool parseFrame(uint32_t payload, Frame& frame) {
+  const uint16_t data = payload >> 4;
+  const uint8_t receivedCrc = payload & CRC_MASK;
 
-  if (receivedChecksum !=
-      calculateChecksum(nodeId, directionBit, sequence)) {
+  if (receivedCrc != calculateCrc(data)) {
     return false;
   }
 
-  const int8_t direction = directionBit ? int8_t{1} : int8_t{-1};
-  frame = {nodeId, direction, sequence, payload};
+  frame = {
+      static_cast<uint8_t>((payload >> NODE_SHIFT) & 0x0F),
+      static_cast<uint8_t>((payload >> BOOT_ID_SHIFT) & 0x03),
+      static_cast<uint8_t>((payload >> POSITION_SHIFT) & 0xFF),
+      payload,
+  };
   return true;
+}
+
+inline int16_t positionDelta(uint8_t current, uint8_t previous) {
+  const uint8_t modularDelta = current - previous;
+  return modularDelta <= 127 ? modularDelta
+                             : static_cast<int16_t>(modularDelta) - 256;
 }
 
 }  // namespace RfProtocolSpec

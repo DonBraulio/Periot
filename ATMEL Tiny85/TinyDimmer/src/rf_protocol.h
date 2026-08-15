@@ -5,5 +5,5 @@
 
 using RfFrame = RfProtocolSpec::Frame;
 
-RfFrame createRfFrame(uint8_t nodeId, int8_t direction, uint8_t sequence);
+RfFrame createRfFrame(uint8_t nodeId, uint8_t bootId, uint8_t position);
 void sendRfFrame(uint8_t txPin, const RfFrame& frame);

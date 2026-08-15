@@ -47,7 +47,7 @@ enum class DecoderState : uint8_t {
 
 struct DecoderStats {
   uint32_t decodedFrames = 0;
-  uint32_t checksumFailures = 0;
+  uint32_t crcFailures = 0;
   uint32_t syncFailures = 0;
   uint32_t invalidPulses = 0;
   uint32_t incompleteFrames = 0;
@@ -77,7 +77,7 @@ TimingStats validSyncSpaceTimings;
 
 uint8_t preambleCycles = 0;
 bool preambleMarkSeen = false;
-uint16_t payload = 0;
+uint32_t payload = 0;
 uint8_t bitsRead = 0;
 uint16_t candidateTimings[RF_PAYLOAD_BITS * 2] = {};
 uint8_t candidateTimingCount = 0;
@@ -186,7 +186,7 @@ void recordValidFrameTimings() {
 
 bool parsePayload(RfFrame& frame) {
   if (!RfProtocolSpec::parseFrame(payload, frame)) {
-    ++decoderStats.checksumFailures;
+    ++decoderStats.crcFailures;
     return false;
   }
 
@@ -338,8 +338,8 @@ void printRfDiagnostics() {
 
   Serial.print("RF stats: frames=");
   Serial.print(decoderStats.decodedFrames);
-  Serial.print(" checksum_failures=");
-  Serial.print(decoderStats.checksumFailures);
+  Serial.print(" crc_failures=");
+  Serial.print(decoderStats.crcFailures);
   Serial.print(" sync_failures=");
   Serial.print(decoderStats.syncFailures);
   Serial.print(" invalid_pulses=");

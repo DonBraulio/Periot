@@ -1,6 +1,8 @@
 #include <Arduino.h>
+#include <EEPROM.h>
 #include <avr/interrupt.h>
 #include <avr/sleep.h>
+#include <avr/wdt.h>
 
 #include "rf_protocol.h"
 
@@ -10,16 +12,20 @@ constexpr uint8_t ENC_B_PIN = 4;
 constexpr uint8_t LED_PIN = 0;
 constexpr uint8_t RF_TX_PIN = 1;
 constexpr uint8_t NODE_ID = 1;
+constexpr uint8_t BOOT_ID_EEPROM_ADDRESS = 0;
 constexpr uint8_t STEP_QUEUE_SIZE = 16;
 constexpr uint8_t STEP_QUEUE_MASK = STEP_QUEUE_SIZE - 1;
 
 volatile int8_t encoderAccum = 0;
-volatile uint8_t lastState = 0;
+volatile uint8_t lastEncoderState = 0;
 volatile int8_t stepQueue[STEP_QUEUE_SIZE] = {};
 volatile uint8_t stepQueueHead = 0;
 volatile uint8_t stepQueueTail = 0;
+volatile bool cooldownExpired = true;
 
-uint8_t sequence = 0;
+uint8_t bootId = 0;
+uint8_t encoderPosition = 0;
+uint8_t lastSentPosition = 0;
 
 uint8_t readEncoderState() {
   const uint8_t pins = PINB;
@@ -40,11 +46,11 @@ void enqueueEncoderStep(int8_t direction) {
 
 ISR(PCINT0_vect) {
   const uint8_t currentState = readEncoderState();
-  if (currentState == lastState) {
+  if (currentState == lastEncoderState) {
     return;
   }
 
-  const uint8_t transition = (lastState << 2) | currentState;
+  const uint8_t transition = (lastEncoderState << 2) | currentState;
   switch (transition) {
     case 0b1110:
     case 0b1000:
@@ -64,7 +70,7 @@ ISR(PCINT0_vect) {
       break;
   }
 
-  lastState = currentState;
+  lastEncoderState = currentState;
 
   if (encoderAccum >= 4) {
     encoderAccum = 0;
@@ -73,6 +79,11 @@ ISR(PCINT0_vect) {
     encoderAccum = 0;
     enqueueEncoderStep(-1);
   }
+}
+
+ISR(WDT_vect) {
+  wdt_disable();
+  cooldownExpired = true;
 }
 
 bool dequeueEncoderStep(int8_t& direction) {
@@ -90,10 +101,49 @@ bool dequeueEncoderStep(int8_t& direction) {
   return true;
 }
 
-void sleepUntilEncoderInterrupt() {
+void processQueuedSteps() {
+  int8_t direction;
+  while (dequeueEncoderStep(direction)) {
+    encoderPosition += direction;
+  }
+}
+
+uint8_t nextBootId() {
+  const uint8_t previousBootId = EEPROM.read(BOOT_ID_EEPROM_ADDRESS);
+  const uint8_t newBootId =
+      previousBootId <= 3 ? (previousBootId + 1) & 0x03 : 0;
+  EEPROM.update(BOOT_ID_EEPROM_ADDRESS, newBootId);
+  return newBootId;
+}
+
+void armCooldownWatchdog() {
+  const uint8_t savedStatus = SREG;
   cli();
 
-  if (stepQueueTail != stepQueueHead) {
+  cooldownExpired = false;
+  wdt_reset();
+  MCUSR &= ~_BV(WDRF);
+  WDTCR = _BV(WDCE) | _BV(WDE);
+  WDTCR = _BV(WDIE) | _BV(WDP2);  // Approximately 250 ms.
+
+  SREG = savedStatus;
+}
+
+bool frameIsReady() {
+  const uint8_t savedStatus = SREG;
+  cli();
+  const bool ready = cooldownExpired && encoderPosition != lastSentPosition;
+  SREG = savedStatus;
+  return ready;
+}
+
+void sleepUntilInterrupt() {
+  cli();
+
+  const bool queueHasSteps = stepQueueTail != stepQueueHead;
+  const bool frameReady =
+      cooldownExpired && encoderPosition != lastSentPosition;
+  if (queueHasSteps || frameReady) {
     sei();
     return;
   }
@@ -107,7 +157,8 @@ void sleepUntilEncoderInterrupt() {
   sleep_disable();
 }
 
-void flashLed(uint8_t times) {
+void flashLed(int16_t delta) {
+  const uint8_t times = delta > 0 ? 1 : 2;
   for (uint8_t i = 0; i < times; i++) {
     digitalWrite(LED_PIN, HIGH);
     delay(60);
@@ -116,25 +167,29 @@ void flashLed(uint8_t times) {
   }
 }
 
-void handleEncoderStep(int8_t direction) {
-  RfFrame frame = createRfFrame(NODE_ID, direction, sequence);
-  sendRfFrame(RF_TX_PIN, frame);
-  sequence = (sequence + 1) & 0x03;
+void sendCurrentPosition() {
+  const uint8_t positionToSend = encoderPosition;
+  const int16_t delta =
+      RfProtocolSpec::positionDelta(positionToSend, lastSentPosition);
+  const RfFrame frame = createRfFrame(NODE_ID, bootId, positionToSend);
 
-  flashLed(direction > 0 ? 1 : 2);
+  sendRfFrame(RF_TX_PIN, frame);
+  lastSentPosition = positionToSend;
+  armCooldownWatchdog();
+  flashLed(delta);
 }
 
 void setup() {
   pinMode(ENC_A_PIN, INPUT_PULLUP);
   pinMode(ENC_B_PIN, INPUT_PULLUP);
-
   pinMode(LED_PIN, OUTPUT);
   pinMode(RF_TX_PIN, OUTPUT);
 
   digitalWrite(LED_PIN, LOW);
   digitalWrite(RF_TX_PIN, LOW);
 
-  lastState = readEncoderState();
+  bootId = nextBootId();
+  lastEncoderState = readEncoderState();
 
   // Wake on changes from either encoder phase: PB3/PCINT3 or PB4/PCINT4.
   PCMSK |= _BV(PCINT3) | _BV(PCINT4);
@@ -148,10 +203,11 @@ void setup() {
 }
 
 void loop() {
-  int8_t direction;
-  if (dequeueEncoderStep(direction)) {
-    handleEncoderStep(direction);
+  processQueuedSteps();
+
+  if (frameIsReady()) {
+    sendCurrentPosition();
   }
 
-  sleepUntilEncoderInterrupt();
+  sleepUntilInterrupt();
 }
