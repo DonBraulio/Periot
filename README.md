@@ -11,7 +11,24 @@ are deliberately not integrated yet.
 ## Architecture
 
 ```text
-Rotary encoder -> ATtiny85 -> SYN115 transmitter ))) 433 MHz ((( SYN480R -> ESP32-C3
+            +-------------------------------------------+
+            |     Remote potentiometer (battery)        |
+            |                                           |
+User     ----> Rotary Encoder --> ATtiny85 --> TX 433   | ~~RF~~>
+turns       |             (sleeps almost always)        |
+            |                                           |
+            |           Battery powers ATtiny + TX      |
+            +-------------------------------------------+
+
+
+                 +------------------------+
+                 | Central Hub (always ON)|
+                 |                        |
+                 |  +------------------+  |
+RF 433 MHz ----> |  |      ESP32       | ---- WiFi/UDP ----> WiZ Bulbs
+                 |  |  + RX 433 MHz    |  |
+                 |  +------------------+  |
+                 +------------------------+
 ```
 
 Each encoder detent produces exactly one RF frame. Frames carry a relative
@@ -51,6 +68,7 @@ All timings below are nominal transmitter timings:
 - Payload: 10 bits, most-significant bit first.
 - Bit 0: 400 us HIGH + 400 us LOW.
 - Bit 1: 400 us HIGH + 1200 us LOW.
+- Stop: 400 us HIGH, which closes the final payload LOW at the receiver.
 
 Payload layout:
 
@@ -73,11 +91,20 @@ loss while still requiring a strong noise discriminator. Timing windows are
 constants near the top of `PeriotESP32/src/rf_protocol.cpp` and are intended to be
 tuned from measurements.
 
+| Element | Transmitted | Initially accepted by receiver |
+| --- | ---: | ---: |
+| Mark | 400 us | 250–700 us |
+| Zero space | 400 us | 250–700 us |
+| One space | 1200 us | 900–1600 us |
+| Sync space | 3000 us | 2200–4200 us |
+
 ## Firmware structure
 
 Both firmware entry points only coordinate their local hardware and the RF
 module:
 
+- `common/RfProtocol/src/rf_protocol_spec.h` is the single source of truth for
+  frame layout, checksum, and nominal wire timings.
 - `ATMEL Tiny85/TinyDimmer/src/rf_protocol.*` creates and transmits frames.
 - `PeriotESP32/src/rf_protocol.*` captures edges, decodes frames, and reports
   receiver diagnostics.
@@ -118,9 +145,9 @@ RF frame: node=1 direction=+1 sequence=2 payload=0b0001110110
 
 The hub also prints counters every five seconds. Noise may increase invalid
 pulse counts, but must not produce valid frames. `buffer_overflows` should stay
-at zero. Valid-frame min/average/max timings are reported separately for HIGH,
-short LOW, long LOW, and sync LOW pulses. Compare these with a Saleae capture
-before tightening the windows.
+at zero. Valid-frame min/average/max timings are reported separately for mark,
+zero space, one space, and sync space pulses. Compare these with a Saleae
+capture before tightening the windows.
 
 ## Current decisions
 

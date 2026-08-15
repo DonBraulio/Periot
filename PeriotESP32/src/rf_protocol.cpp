@@ -2,30 +2,47 @@
 
 namespace {
 
-constexpr uint8_t MIN_PREAMBLE_CYCLES = 12;
+// Set this to true if Saleae shows that receiver DAT inverts TX DAT.
+constexpr bool RECEIVER_OUTPUT_INVERTED = false;
 
 constexpr uint16_t MIN_PULSE_US = 150;
 constexpr uint16_t MAX_PULSE_US = 5000;
-constexpr uint16_t SHORT_MIN_US = 250;
-constexpr uint16_t SHORT_MAX_US = 700;
-constexpr uint16_t LONG_MIN_US = 900;
-constexpr uint16_t LONG_MAX_US = 1600;
-constexpr uint16_t SYNC_LOW_MIN_US = 2200;
-constexpr uint16_t SYNC_LOW_MAX_US = 4200;
+
+struct TimingWindow {
+  uint16_t minimumUs;
+  uint16_t maximumUs;
+};
+
+constexpr TimingWindow MARK_WINDOW = {
+    RfProtocolSpec::MARK_US - 150,
+    RfProtocolSpec::MARK_US + 300,
+};
+constexpr TimingWindow ZERO_SPACE_WINDOW = {
+    RfProtocolSpec::ZERO_SPACE_US - 150,
+    RfProtocolSpec::ZERO_SPACE_US + 300,
+};
+constexpr TimingWindow ONE_SPACE_WINDOW = {
+    RfProtocolSpec::ONE_SPACE_US - 300,
+    RfProtocolSpec::ONE_SPACE_US + 400,
+};
+constexpr TimingWindow SYNC_SPACE_WINDOW = {
+    RfProtocolSpec::SYNC_SPACE_US - 800,
+    RfProtocolSpec::SYNC_SPACE_US + 1200,
+};
 
 constexpr uint16_t EDGE_BUFFER_SIZE = 128;
 constexpr uint32_t STATS_PERIOD_MS = 5000;
 
 struct EdgePulse {
   uint16_t durationUs;
-  bool wasHigh;
+  bool wasMark;
 };
 
 enum class DecoderState : uint8_t {
   WaitingPreamble,
-  WaitingSyncLow,
-  ReadingBitHigh,
-  ReadingBitLow,
+  WaitingSyncSpace,
+  ReadingBitMark,
+  ReadingBitSpace,
 };
 
 struct DecoderStats {
@@ -53,34 +70,42 @@ portMUX_TYPE edgeBufferMux = portMUX_INITIALIZER_UNLOCKED;
 
 DecoderState decoderState = DecoderState::WaitingPreamble;
 DecoderStats decoderStats;
-TimingStats validHighTimings;
-TimingStats validShortLowTimings;
-TimingStats validLongLowTimings;
-TimingStats validSyncLowTimings;
+TimingStats validMarkTimings;
+TimingStats validZeroSpaceTimings;
+TimingStats validOneSpaceTimings;
+TimingStats validSyncSpaceTimings;
 
 uint8_t preambleCycles = 0;
-bool preambleHighSeen = false;
+bool preambleMarkSeen = false;
 uint16_t payload = 0;
 uint8_t bitsRead = 0;
 uint16_t candidateTimings[RF_PAYLOAD_BITS * 2] = {};
 uint8_t candidateTimingCount = 0;
-uint16_t candidateSyncLowUs = 0;
+uint16_t candidateSyncSpaceUs = 0;
 unsigned long lastStatsMs = 0;
 
 bool inRange(uint16_t value, uint16_t minimum, uint16_t maximum) {
   return value >= minimum && value <= maximum;
 }
 
-bool isShort(uint16_t durationUs) {
-  return inRange(durationUs, SHORT_MIN_US, SHORT_MAX_US);
+bool inWindow(uint16_t value, const TimingWindow& window) {
+  return inRange(value, window.minimumUs, window.maximumUs);
 }
 
-bool isLong(uint16_t durationUs) {
-  return inRange(durationUs, LONG_MIN_US, LONG_MAX_US);
+bool isMark(uint16_t durationUs) {
+  return inWindow(durationUs, MARK_WINDOW);
 }
 
-bool isSyncLow(uint16_t durationUs) {
-  return inRange(durationUs, SYNC_LOW_MIN_US, SYNC_LOW_MAX_US);
+bool isZeroSpace(uint16_t durationUs) {
+  return inWindow(durationUs, ZERO_SPACE_WINDOW);
+}
+
+bool isOneSpace(uint16_t durationUs) {
+  return inWindow(durationUs, ONE_SPACE_WINDOW);
+}
+
+bool isSyncSpace(uint16_t durationUs) {
+  return inWindow(durationUs, SYNC_SPACE_WINDOW);
 }
 
 void IRAM_ATTR onRfEdge() {
@@ -89,6 +114,9 @@ void IRAM_ATTR onRfEdge() {
   lastEdgeUs = nowUs;
 
   const bool completedPulseWasHigh = digitalRead(receiverPin) == LOW;
+  const bool completedPulseWasMark =
+      RECEIVER_OUTPUT_INVERTED ? !completedPulseWasHigh
+                               : completedPulseWasHigh;
 
   portENTER_CRITICAL_ISR(&edgeBufferMux);
   const uint16_t nextWriteIndex = (edgeWriteIndex + 1) % EDGE_BUFFER_SIZE;
@@ -98,7 +126,7 @@ void IRAM_ATTR onRfEdge() {
     edgeBuffer[edgeWriteIndex] = {
         static_cast<uint16_t>(durationUs > UINT16_MAX ? UINT16_MAX
                                                       : durationUs),
-        completedPulseWasHigh,
+        completedPulseWasMark,
     };
     edgeWriteIndex = nextWriteIndex;
   }
@@ -120,23 +148,18 @@ bool popEdgePulse(EdgePulse& pulse) {
 void resetDecoder() {
   decoderState = DecoderState::WaitingPreamble;
   preambleCycles = 0;
-  preambleHighSeen = false;
+  preambleMarkSeen = false;
   payload = 0;
   bitsRead = 0;
   candidateTimingCount = 0;
-  candidateSyncLowUs = 0;
+  candidateSyncSpaceUs = 0;
 }
 
 void restartPreambleWith(const EdgePulse& pulse) {
   resetDecoder();
-  if (pulse.wasHigh && isShort(pulse.durationUs)) {
-    preambleHighSeen = true;
+  if (pulse.wasMark && isMark(pulse.durationUs)) {
+    preambleMarkSeen = true;
   }
-}
-
-uint8_t calculateChecksum(uint8_t nodeId, uint8_t directionBit,
-                          uint8_t sequence) {
-  return (nodeId ^ (directionBit << 1) ^ (sequence << 2) ^ 0b101) & 0x07;
 }
 
 void addTimingSample(TimingStats& stats, uint16_t durationUs) {
@@ -147,35 +170,26 @@ void addTimingSample(TimingStats& stats, uint16_t durationUs) {
 }
 
 void recordValidFrameTimings() {
-  addTimingSample(validSyncLowTimings, candidateSyncLowUs);
+  addTimingSample(validSyncSpaceTimings, candidateSyncSpaceUs);
 
   for (uint8_t i = 0; i < candidateTimingCount; ++i) {
     const uint16_t durationUs = candidateTimings[i];
     if ((i & 0x01) == 0) {
-      addTimingSample(validHighTimings, durationUs);
-    } else if (isLong(durationUs)) {
-      addTimingSample(validLongLowTimings, durationUs);
+      addTimingSample(validMarkTimings, durationUs);
+    } else if (isOneSpace(durationUs)) {
+      addTimingSample(validOneSpaceTimings, durationUs);
     } else {
-      addTimingSample(validShortLowTimings, durationUs);
+      addTimingSample(validZeroSpaceTimings, durationUs);
     }
   }
 }
 
 bool parsePayload(RfFrame& frame) {
-  const uint8_t nodeId = (payload >> 6) & 0x0F;
-  const uint8_t directionBit = (payload >> 5) & 0x01;
-  const uint8_t sequence = (payload >> 3) & 0x03;
-  const uint8_t receivedChecksum = payload & 0x07;
-  const uint8_t expectedChecksum =
-      calculateChecksum(nodeId, directionBit, sequence);
-
-  if (receivedChecksum != expectedChecksum) {
+  if (!RfProtocolSpec::parseFrame(payload, frame)) {
     ++decoderStats.checksumFailures;
     return false;
   }
 
-  const int8_t direction = directionBit ? int8_t{1} : int8_t{-1};
-  frame = {nodeId, direction, sequence, payload};
   ++decoderStats.decodedFrames;
   recordValidFrameTimings();
   return true;
@@ -190,42 +204,42 @@ bool processPulse(const EdgePulse& pulse, RfFrame& frame) {
 
   switch (decoderState) {
     case DecoderState::WaitingPreamble:
-      if (pulse.wasHigh) {
-        if (isShort(pulse.durationUs)) {
-          preambleHighSeen = true;
-          if (preambleCycles >= MIN_PREAMBLE_CYCLES) {
-            decoderState = DecoderState::WaitingSyncLow;
+      if (pulse.wasMark) {
+        if (isMark(pulse.durationUs)) {
+          preambleMarkSeen = true;
+          if (preambleCycles >=
+              RfProtocolSpec::MIN_RECEIVED_PREAMBLE_CYCLES) {
+            decoderState = DecoderState::WaitingSyncSpace;
           }
         } else {
           restartPreambleWith(pulse);
         }
-      } else if (preambleHighSeen && isShort(pulse.durationUs)) {
+      } else if (preambleMarkSeen && isZeroSpace(pulse.durationUs)) {
         if (preambleCycles < UINT8_MAX) {
           ++preambleCycles;
         }
-        preambleHighSeen = false;
+        preambleMarkSeen = false;
       } else {
         resetDecoder();
       }
       break;
 
-    case DecoderState::WaitingSyncLow:
-      Serial.print("sync low wait...\n");
-      if (pulse.wasHigh || !preambleHighSeen) {
+    case DecoderState::WaitingSyncSpace:
+      if (pulse.wasMark || !preambleMarkSeen) {
         ++decoderStats.syncFailures;
         restartPreambleWith(pulse);
-      } else if (isSyncLow(pulse.durationUs)) {
-        candidateSyncLowUs = pulse.durationUs;
-        decoderState = DecoderState::ReadingBitHigh;
-        preambleHighSeen = false;
+      } else if (isSyncSpace(pulse.durationUs)) {
+        candidateSyncSpaceUs = pulse.durationUs;
+        decoderState = DecoderState::ReadingBitMark;
+        preambleMarkSeen = false;
         payload = 0;
         bitsRead = 0;
         candidateTimingCount = 0;
-      } else if (isShort(pulse.durationUs)) {
+      } else if (isZeroSpace(pulse.durationUs)) {
         if (preambleCycles < UINT8_MAX) {
           ++preambleCycles;
         }
-        preambleHighSeen = false;
+        preambleMarkSeen = false;
         decoderState = DecoderState::WaitingPreamble;
       } else {
         ++decoderStats.syncFailures;
@@ -233,10 +247,10 @@ bool processPulse(const EdgePulse& pulse, RfFrame& frame) {
       }
       break;
 
-    case DecoderState::ReadingBitHigh:
-      if (pulse.wasHigh && isShort(pulse.durationUs)) {
+    case DecoderState::ReadingBitMark:
+      if (pulse.wasMark && isMark(pulse.durationUs)) {
         candidateTimings[candidateTimingCount++] = pulse.durationUs;
-        decoderState = DecoderState::ReadingBitLow;
+        decoderState = DecoderState::ReadingBitSpace;
       } else {
         ++decoderStats.invalidPulses;
         ++decoderStats.incompleteFrames;
@@ -244,9 +258,10 @@ bool processPulse(const EdgePulse& pulse, RfFrame& frame) {
       }
       break;
 
-    case DecoderState::ReadingBitLow:
-      if (pulse.wasHigh ||
-          (!isShort(pulse.durationUs) && !isLong(pulse.durationUs))) {
+    case DecoderState::ReadingBitSpace:
+      if (pulse.wasMark ||
+          (!isZeroSpace(pulse.durationUs) &&
+           !isOneSpace(pulse.durationUs))) {
         ++decoderStats.invalidPulses;
         ++decoderStats.incompleteFrames;
         restartPreambleWith(pulse);
@@ -254,7 +269,8 @@ bool processPulse(const EdgePulse& pulse, RfFrame& frame) {
       }
 
       candidateTimings[candidateTimingCount++] = pulse.durationUs;
-      payload = (payload << 1) | (isLong(pulse.durationUs) ? 1 : 0);
+      payload =
+          (payload << 1) | (isOneSpace(pulse.durationUs) ? 1 : 0);
       ++bitsRead;
 
       if (bitsRead == RF_PAYLOAD_BITS) {
@@ -263,7 +279,7 @@ bool processPulse(const EdgePulse& pulse, RfFrame& frame) {
         return validFrame;
       }
 
-      decoderState = DecoderState::ReadingBitHigh;
+      decoderState = DecoderState::ReadingBitMark;
       break;
   }
 
@@ -333,8 +349,8 @@ void printRfDiagnostics() {
   Serial.print(" buffer_overflows=");
   Serial.println(readBufferOverflows());
 
-  printTimingStats("high", validHighTimings);
-  printTimingStats("short_low", validShortLowTimings);
-  printTimingStats("long_low", validLongLowTimings);
-  printTimingStats("sync_low", validSyncLowTimings);
+  printTimingStats("mark", validMarkTimings);
+  printTimingStats("zero_space", validZeroSpaceTimings);
+  printTimingStats("one_space", validOneSpaceTimings);
+  printTimingStats("sync_space", validSyncSpaceTimings);
 }

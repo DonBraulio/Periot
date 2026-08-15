@@ -1,15 +1,11 @@
 #pragma once
 
 #include <Arduino.h>
+#include <rf_protocol_spec.h>
 
-constexpr uint8_t RF_PAYLOAD_BITS = 10;
+constexpr uint8_t RF_PAYLOAD_BITS = RfProtocolSpec::PAYLOAD_BITS;
 
-struct RfFrame {
-  uint8_t nodeId;
-  int8_t direction;
-  uint8_t sequence;
-  uint16_t payload;
-};
+using RfFrame = RfProtocolSpec::Frame;
 
 void setupRfReceiver(uint8_t rxPin);
 bool receiveRfFrame(RfFrame& frame);

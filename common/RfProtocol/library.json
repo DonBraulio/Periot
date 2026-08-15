@@ -1,0 +1,8 @@
+{
+  "name": "RfProtocolSpec",
+  "version": "0.1.0",
+  "description": "Shared wire format for the Periot 433 MHz protocol",
+  "build": {
+    "includeDir": "src"
+  }
+}
