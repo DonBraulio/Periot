@@ -50,6 +50,12 @@ Connect the encoder common pin to GND; A and B use the internal pull-ups. PB1
 is also used by ISP, so disconnecting the transmitter DAT wire may be necessary
 while programming. The firmware clock must remain at 1 MHz.
 
+Both encoder phases use pin-change interrupts (`PCINT3` and `PCINT4`). The
+ATtiny85 stays in power-down sleep while the step queue is empty. Every A or B
+transition wakes it briefly; a complete quadrature detent is queued and then
+transmitted from the main loop. RF transmission and LED feedback never run
+inside the interrupt handler.
+
 ### ESP32-C3 hub
 
 | Signal | GPIO |
@@ -153,6 +159,6 @@ capture before tightening the windows.
 
 - One frame per detent; no retransmission or acknowledgement.
 - Relative direction events; the hub will own brightness state.
-- The original blocking LED feedback is retained to keep this protocol change
-  focused; it should become non-blocking before optimizing fast encoder input.
-- No Micronucleus, sleep mode, or WiZ command integration in this milestone.
+- LED feedback remains enabled for validating wake-up and transmission.
+- The ATtiny85 sleeps in power-down mode between encoder interrupts.
+- No Micronucleus or WiZ command integration in this milestone.
