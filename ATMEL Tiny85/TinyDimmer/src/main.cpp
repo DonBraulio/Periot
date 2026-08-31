@@ -6,10 +6,16 @@
 
 #include "rf_protocol.h"
 
+#ifndef PERIOT_ENABLE_LED_DEBUG
+#define PERIOT_ENABLE_LED_DEBUG 0
+#endif
+
 // Note: PB0, 1 and 2 -> MOSI/MISO/SCK
 constexpr uint8_t ENC_A_PIN = 3;
 constexpr uint8_t ENC_B_PIN = 4;
+#if PERIOT_ENABLE_LED_DEBUG
 constexpr uint8_t LED_PIN = 0;
+#endif
 constexpr uint8_t RF_TX_PIN = 1;
 constexpr uint8_t NODE_ID = 1;
 constexpr uint8_t BOOT_ID_EEPROM_ADDRESS = 0;
@@ -157,6 +163,7 @@ void sleepUntilInterrupt() {
   sleep_disable();
 }
 
+#if PERIOT_ENABLE_LED_DEBUG
 void flashLed(int16_t delta) {
   const uint8_t times = delta > 0 ? 1 : 2;
   for (uint8_t i = 0; i < times; i++) {
@@ -166,26 +173,35 @@ void flashLed(int16_t delta) {
     delay(80);
   }
 }
+#endif
 
 void sendCurrentPosition() {
   const uint8_t positionToSend = encoderPosition;
+#if PERIOT_ENABLE_LED_DEBUG
   const int16_t delta =
       RfProtocolSpec::positionDelta(positionToSend, lastSentPosition);
+#endif
   const RfFrame frame = createRfFrame(NODE_ID, bootId, positionToSend);
 
   sendRfFrame(RF_TX_PIN, frame);
   lastSentPosition = positionToSend;
   armCooldownWatchdog();
+#if PERIOT_ENABLE_LED_DEBUG
   flashLed(delta);
+#endif
 }
 
 void setup() {
   pinMode(ENC_A_PIN, INPUT_PULLUP);
   pinMode(ENC_B_PIN, INPUT_PULLUP);
+#if PERIOT_ENABLE_LED_DEBUG
   pinMode(LED_PIN, OUTPUT);
+#endif
   pinMode(RF_TX_PIN, OUTPUT);
 
+#if PERIOT_ENABLE_LED_DEBUG
   digitalWrite(LED_PIN, LOW);
+#endif
   digitalWrite(RF_TX_PIN, LOW);
 
   bootId = nextBootId();

@@ -65,7 +65,7 @@ packet recover movement from an earlier lost packet.
 | --- | ---: | --- | ---: |
 | Encoder A | 3 | PB3 / PCINT3 | 2 |
 | Encoder B | 4 | PB4 / PCINT4 | 3 |
-| LED | 0 | PB0 / MOSI | 5 |
+| Optional debug LED | 0 | PB0 / MOSI | 5 |
 | SYN115 DAT | 1 | PB1 / MISO | 6 |
 
 Connect the encoder common pin to GND. A and B use the ATtiny internal
@@ -154,8 +154,14 @@ The first detent after inactivity is sent immediately. Detents during the
 cooldown are accumulated and sent together when the watchdog expires. ADC,
 analog comparator, and sleep BOD are disabled where supported.
 
-LED feedback remains enabled for validation: one flash for positive movement,
-two for negative movement. It is not part of the production power strategy.
+LED feedback is compiled out by default, so it adds no delay or runtime work.
+For hardware debugging it can be restored at build time: one flash indicates
+positive movement and two indicate negative movement.
+
+```ini
+build_flags =
+  -D PERIOT_ENABLE_LED_DEBUG=1
+```
 
 ## Rolling position and boot identity
 
@@ -297,7 +303,7 @@ common/RfProtocol/
   src/rf_protocol_spec.h       Shared timings, frame, CRC, modular math
 
 ATMEL Tiny85/TinyDimmer/src/
-  main.cpp                     PCINT, queue, sleep, WDT, EEPROM, LED
+  main.cpp                     PCINT, queue, sleep, WDT, EEPROM, optional LED
   rf_protocol.h/.cpp           Physical OOK frame transmission
 
 PeriotESP32/src/
@@ -372,7 +378,8 @@ distributions.
 - Two-bit boot identity assumes fewer than four unseen remote boots.
 - CRC-4 improves corruption detection but is not a cryptographic integrity
   mechanism.
-- LED feedback is temporary and intentionally excluded from final power goals.
+- LED feedback is disabled by default and available only through a debug build
+  flag.
 - Internal encoder pull-up current must be measured in every stable detent
   state; an encoder contact held LOW can dominate sleep consumption.
 - PCINT activity can stretch software-generated RF pulses and requires hardware
