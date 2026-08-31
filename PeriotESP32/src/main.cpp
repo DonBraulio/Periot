@@ -1,9 +1,15 @@
 #include <Arduino.h>
 
+#include "app_config.h"
 #include "rf_position_tracker.h"
 #include "rf_protocol.h"
+#include "serial_console.h"
+#include "wifi_connection.h"
+#include "wiz_control.h"
+#include "wiz_lamp_controller.h"
+#include "wiz_pairing.h"
 
-constexpr uint8_t RF_RX_PIN = 3;
+WizLightList wizLights;
 
 void printRfFrame(const RfFrame& frame, const RfPositionUpdate& update) {
   Serial.print("RF frame: node=");
@@ -33,11 +39,18 @@ void setup() {
   delay(500);
 
   setupRfPositionTracker();
-  setupRfReceiver(RF_RX_PIN);
+  setupWizPairings();
+
+  if (connectWifi(AppConfig::WIFI_SSID, AppConfig::WIFI_PASSWORD)) {
+    wizLights = discoverWizLights();
+  }
+
+  setupSerialConsole(wizLights);
+  setupRfReceiver(AppConfig::RF_RX_PIN);
 
   Serial.println();
   Serial.print("433 MHz receiver ready on GPIO ");
-  Serial.println(RF_RX_PIN);
+  Serial.println(AppConfig::RF_RX_PIN);
 }
 
 void loop() {
@@ -45,8 +58,10 @@ void loop() {
   while (receiveRfFrame(frame)) {
     const RfPositionUpdate update = trackRfPosition(frame);
     printRfFrame(frame, update);
+    applyWizPositionDelta(frame.nodeId, update.delta, wizLights);
   }
 
+  updateSerialConsole();
   updateRfPositionPersistence();
   printRfDiagnostics();
 }

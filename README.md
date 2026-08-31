@@ -3,11 +3,11 @@
 Periot is an experimental, low-power physical controller for WiZ lamps. A
 battery-powered ATtiny85 reads a rotary encoder and transmits its accumulated
 position over 433 MHz OOK. An always-on ESP32-C3 receives the position changes
-and will eventually translate them into local Wi-Fi/UDP commands for the lamps.
+and translates them into local Wi-Fi/UDP brightness commands for the lamps.
 
-The current milestone validates the encoder interrupts, ATtiny power-down
-sleep, RF batching, packet recovery, and ESP32 state persistence. WiZ commands
-are deliberately not connected to RF events yet.
+The current firmware includes encoder interrupts, ATtiny power-down sleep, RF
+batching and packet recovery, persistent ESP32 state, WiZ discovery, and a
+non-blocking Serial console for persistent node-to-lamp pairing.
 
 ## System architecture
 
@@ -44,6 +44,8 @@ packet recover movement from an earlier lost packet.
 - Preserve movement across lost RF frames using a cumulative position.
 - Keep protocol layout and nominal timings in one shared source of truth.
 - Keep RF transport separate from lamp and application behavior.
+- Identify lamps by stable MAC address and rediscover their current IP at boot.
+- Allow one physical controller to operate a small group of lamps.
 - Avoid frequent EEPROM/NVS writes.
 
 ## Hardware
@@ -210,6 +212,66 @@ from being applied again. Losing hub power during that ten-second interval can
 replay the unpersisted delta after restart; this is an accepted prototype
 tradeoff and can later be addressed alongside lamp-state persistence.
 
+## WiZ discovery, pairing, and control
+
+The ESP32 runs the following sequence without requiring Serial interaction:
+
+```text
+boot
+  |
+  +--> restore RF positions from NVS
+  +--> restore node-to-MAC pairings from NVS
+  +--> connect to Wi-Fi
+  +--> broadcast WiZ getPilot for 3 seconds
+  +--> cache MAC + current IP + state + dimming
+  +--> print discovered lamps, pairings, and command help
+  +--> enable the 433 MHz receiver
+  |
+  +--> normal loop: RF decoder + Serial console + deferred persistence
+```
+
+Discovery is intentionally completed before enabling the noisy 433 MHz input,
+so its three-second startup window cannot fill the RF edge buffer. Lamp IP
+addresses are treated as temporary: each persistent pairing stores only the
+normalized 12-digit MAC in NVS, then resolves it against the new boot inventory.
+The numeric lamp indices shown over Serial are only shortcuts for that current
+inventory and need not remain stable across boots.
+
+Open PlatformIO's bidirectional Serial monitor and send newline-terminated
+commands:
+
+```text
+lights                         list lamps discovered during this boot
+pairs                          list persistent node-to-MAC mappings
+pair <node_id> <light_index>   add a lamp to a node
+unpair <node_id> <light_index> remove a lamp from a node
+clear <node_id>                remove every lamp from a node
+help                           print the command reference
+```
+
+For example, after `lights` reports `[0]` and `[1]`, these commands make remote
+node 1 control both lamps as a group:
+
+```text
+pair 1 0
+pair 1 1
+pairs
+```
+
+Each node supports up to four lamps. A lamp may be paired with more than one
+node. Pairing changes are written immediately because they are rare user
+configuration events. `clear` also works when a previously paired lamp is
+offline; individual `unpair` commands use the current discovered-lamp index.
+Reboot the ESP32 to repeat discovery after adding or powering on a lamp.
+
+Every received encoder detent changes brightness by five percentage points,
+including batched deltas larger than one. The target is clamped to WiZ's
+10–100 dimming range. The UDP command contains only `state=true` and `dimming`,
+so it turns an off lamp on but does not force a color, scene, or color
+temperature. The discovery value is the initial brightness baseline; later
+commands update the cached value optimistically because this prototype does not
+wait for a WiZ acknowledgement.
+
 ## RF wire protocol
 
 All nominal wire constants and the frame pack/unpack code live in:
@@ -307,10 +369,15 @@ ATMEL Tiny85/TinyDimmer/src/
   rf_protocol.h/.cpp           Physical OOK frame transmission
 
 PeriotESP32/src/
-  main.cpp                     RF test application and serial output
+  app_config.h                 Wi-Fi, RF pin, and dimming configuration
+  main.cpp                     Startup and application event flow
   rf_protocol.h/.cpp           Edge capture and waveform decoder
   rf_position_tracker.h/.cpp   Modular deltas and deferred NVS persistence
-  wiz_control.h/.cpp           Existing WiZ UDP experimentation
+  serial_console.h/.cpp        Non-blocking pairing command parser
+  wifi_connection.h/.cpp       Station-mode Wi-Fi connection
+  wiz_control.h/.cpp           WiZ discovery and brightness-only UDP control
+  wiz_lamp_controller.h/.cpp   RF delta to paired-lamp behavior
+  wiz_pairing.h/.cpp           Persistent node-to-MAC mappings
 ```
 
 ## Build, upload, and monitor
@@ -354,9 +421,15 @@ pio device list
 5. Reset the ATtiny and confirm `new_boot=yes` with the next `boot_id`.
 6. Restart the ESP32 after NVS persistence and confirm it restores the previous
    baseline instead of replaying movement.
-7. While turning continuously, inspect RF timings and ensure CRC failures and
+7. Run `lights`, pair a discovered index with the transmitting `node_id`, then
+   confirm `pairs` shows the MAC mapping.
+8. Turn in both directions and confirm brightness changes in five-point steps,
+   including a rapid turn whose RF frame has a delta larger than one.
+9. Reboot the ESP32 and confirm the pairing remains while the lamp IP is
+   rediscovered.
+10. While turning continuously, inspect RF timings and ensure CRC failures and
    incomplete frames remain negligible.
-8. `buffer_overflows` may increase because the SYN480R is noisy while idle, but
+11. `buffer_overflows` may increase because the SYN480R is noisy while idle, but
    valid frames must not cause false actions.
 
 Expected serial output resembles:
@@ -380,6 +453,11 @@ distributions.
   mechanism.
 - LED feedback is disabled by default and available only through a debug build
   flag.
+- WiZ discovery runs only at boot; changing the available lamp set requires an
+  ESP32 restart.
+- Wi-Fi reconnect and WiZ command acknowledgements are not implemented yet.
+- Pairing is persistent by MAC, while lamp IP, power, and brightness are cached
+  from the current boot discovery.
 - Internal encoder pull-up current must be measured in every stable detent
   state; an encoder contact held LOW can dominate sleep consumption.
 - PCINT activity can stretch software-generated RF pulses and requires hardware

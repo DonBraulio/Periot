@@ -1,27 +1,83 @@
 #include "wiz_control.h"
 
 #include <ArduinoJson.h>
-#include <WiFi.h>
 #include <WiFiUdp.h>
 
-static WiFiUDP wizUdp;
+namespace {
 
-static const uint16_t WIZ_PORT = 38899;
-static const uint16_t LOCAL_UDP_PORT = 38900;
+constexpr uint16_t WIZ_PORT = 38899;
+constexpr uint16_t LOCAL_UDP_PORT = 38900;
+constexpr unsigned long DISCOVERY_INTERVAL_MS = 500;
 
-static bool udpStarted = false;
+WiFiUDP wizUdp;
+bool udpStarted = false;
 
-static void ensureUdpStarted() {
-  if (!udpStarted) {
-    wizUdp.begin(LOCAL_UDP_PORT);
-    udpStarted = true;
+void ensureUdpStarted() {
+  if (udpStarted) {
+    return;
+  }
 
+  udpStarted = wizUdp.begin(LOCAL_UDP_PORT) == 1;
+  if (udpStarted) {
     Serial.print("WiZ UDP listener started on local port ");
     Serial.println(LOCAL_UDP_PORT);
+  } else {
+    Serial.println("WiZ UDP listener could not be started");
   }
 }
 
-static String normalizeMac(String mac) {
+bool sendUdpJson(const IPAddress& ip, const char* json) {
+  ensureUdpStarted();
+  if (!udpStarted || wizUdp.beginPacket(ip, WIZ_PORT) != 1) {
+    return false;
+  }
+
+  wizUdp.write(reinterpret_cast<const uint8_t*>(json), strlen(json));
+  return wizUdp.endPacket() == 1;
+}
+
+void sendDiscoveryBroadcast() {
+  static const char discoveryJson[] =
+      "{\"method\":\"getPilot\",\"params\":{}}";
+
+  if (!sendUdpJson(IPAddress(255, 255, 255, 255), discoveryJson)) {
+    Serial.println("WiZ discovery broadcast failed");
+  }
+}
+
+void updateDiscoveredLight(WizLightList& lights, const String& mac,
+                           const IPAddress& ip, bool state, int dimming,
+                           int rssi) {
+  WizLight* existing = findWizLightByMac(lights, mac);
+  if (existing != nullptr) {
+    existing->ip = ip;
+    existing->state = state;
+    existing->dimming = dimming;
+    existing->rssi = rssi;
+    return;
+  }
+
+  lights.push_back({mac, ip, state, dimming, rssi});
+
+  Serial.print("Found WiZ lamp: MAC=");
+  Serial.print(mac);
+  Serial.print(" IP=");
+  Serial.print(ip);
+  Serial.print(" state=");
+  Serial.print(state ? "on" : "off");
+  Serial.print(" dimming=");
+  if (dimming >= 0) {
+    Serial.print(dimming);
+  } else {
+    Serial.print("unknown");
+  }
+  Serial.print(" rssi=");
+  Serial.println(rssi);
+}
+
+}  // namespace
+
+String normalizeWizMac(String mac) {
   mac.toUpperCase();
   mac.replace(":", "");
   mac.replace("-", "");
@@ -29,159 +85,99 @@ static String normalizeMac(String mac) {
   return mac;
 }
 
-static bool isRequestedMac(const String& mac,
-                           const std::vector<String>& requestedMacs) {
-  for (String requested : requestedMacs) {
-    requested = normalizeMac(requested);
+WizLightList discoverWizLights(unsigned long timeoutMs) {
+  ensureUdpStarted();
 
-    if (mac == requested) {
-      return true;
+  WizLightList lights;
+  const unsigned long startMs = millis();
+  unsigned long lastBroadcastMs = 0;
+
+  Serial.println("Starting WiZ discovery...");
+
+  while (millis() - startMs < timeoutMs) {
+    const unsigned long now = millis();
+    if (lastBroadcastMs == 0 ||
+        now - lastBroadcastMs >= DISCOVERY_INTERVAL_MS) {
+      sendDiscoveryBroadcast();
+      lastBroadcastMs = now;
+    }
+
+    const int packetSize = wizUdp.parsePacket();
+    if (packetSize <= 0) {
+      delay(5);
+      continue;
+    }
+
+    char buffer[768];
+    const int length = wizUdp.read(buffer, sizeof(buffer) - 1);
+    if (length <= 0) {
+      continue;
+    }
+    buffer[length] = '\0';
+
+    JsonDocument document;
+    const DeserializationError error = deserializeJson(document, buffer);
+    if (error) {
+      Serial.print("Ignoring invalid WiZ JSON from ");
+      Serial.println(wizUdp.remoteIP());
+      continue;
+    }
+
+    const JsonObjectConst result = document["result"].as<JsonObjectConst>();
+    const char* rawMac = result["mac"] | "";
+    const String mac = normalizeWizMac(String(rawMac));
+    if (mac.length() != 12) {
+      continue;
+    }
+
+    const bool state = result["state"] | false;
+    const int dimming = result["dimming"] | -1;
+    const int rssi = result["rssi"] | 0;
+    updateDiscoveredLight(lights, mac, wizUdp.remoteIP(), state, dimming,
+                          rssi);
+  }
+
+  Serial.print("WiZ discovery finished: ");
+  Serial.print(lights.size());
+  Serial.println(" lamp(s) found");
+  return lights;
+}
+
+WizLight* findWizLightByMac(WizLightList& lights, const String& mac) {
+  const String normalizedMac = normalizeWizMac(mac);
+  for (WizLight& light : lights) {
+    if (light.mac == normalizedMac) {
+      return &light;
     }
   }
-
-  return false;
+  return nullptr;
 }
 
-static void sendUdpJson(IPAddress ip, const char* json) {
-  ensureUdpStarted();
-
-  Serial.print("Sending UDP to ");
-  Serial.print(ip);
-  Serial.print(":");
-  Serial.print(WIZ_PORT);
-  Serial.print(" -> ");
-  Serial.println(json);
-
-  wizUdp.beginPacket(ip, WIZ_PORT);
-  wizUdp.write((const uint8_t*)json, strlen(json));
-  wizUdp.endPacket();
-}
-
-static void sendDiscoveryBroadcast() {
-  IPAddress broadcastIp(255, 255, 255, 255);
-
-  // getPilot usually returns useful data such as mac, state, dimming, rssi,
-  // etc.
-  const char* discoveryJson = "{\"method\":\"getPilot\",\"params\":{}}";
-
-  Serial.println("Sending WiZ discovery broadcast...");
-
-  wizUdp.beginPacket(broadcastIp, WIZ_PORT);
-  wizUdp.write((const uint8_t*)discoveryJson, strlen(discoveryJson));
-  wizUdp.endPacket();
-}
-
-void setWizWarm(int dimming, IPAddress ip) {
-  ensureUdpStarted();
-
-  if (dimming < 10) {
-    dimming = 10;
+const WizLight* findWizLightByMac(const WizLightList& lights,
+                                 const String& mac) {
+  const String normalizedMac = normalizeWizMac(mac);
+  for (const WizLight& light : lights) {
+    if (light.mac == normalizedMac) {
+      return &light;
+    }
   }
+  return nullptr;
+}
 
-  if (dimming > 100) {
-    dimming = 100;
-  }
+bool setWizDimming(WizLight& light, int dimming) {
+  dimming = constrain(dimming, 10, 100);
 
-  // Warm white. 2700K is a typical warm color temperature.
-  char json[160];
-
+  char json[112];
   snprintf(json, sizeof(json),
-           "{\"method\":\"setPilot\",\"params\":{\"state\":true,\"temp\":2700,"
+           "{\"method\":\"setPilot\",\"params\":{\"state\":true,"
            "\"dimming\":%d}}",
            dimming);
 
-  sendUdpJson(ip, json);
-}
-
-WizIpMap getWizIPs(const std::vector<String>& macAddresses) {
-  ensureUdpStarted();
-
-  WizIpMap requestedLights;
-
-  const unsigned long timeoutMs = 3000;
-  const unsigned long checkIntervalMs = 500;
-
-  unsigned long start = millis();
-  unsigned long lastBroadcast = 0;
-
-  Serial.println("Starting WiZ discovery...");
-  Serial.print("Looking for ");
-  Serial.print(macAddresses.size());
-  Serial.println(" requested MAC address(es).");
-
-  while (millis() - start < timeoutMs) {
-    // Re-send discovery every 500 ms.
-    if (millis() - lastBroadcast >= checkIntervalMs || lastBroadcast == 0) {
-      sendDiscoveryBroadcast();
-      lastBroadcast = millis();
-    }
-
-    int packetSize = wizUdp.parsePacket();
-
-    if (packetSize > 0) {
-      char buffer[768];
-
-      int len = wizUdp.read(buffer, sizeof(buffer) - 1);
-      buffer[len] = '\0';
-
-      IPAddress remoteIp = wizUdp.remoteIP();
-
-      StaticJsonDocument<768> doc;
-      DeserializationError error = deserializeJson(doc, buffer);
-
-      if (error) {
-        Serial.print("Received invalid JSON from ");
-        Serial.print(remoteIp);
-        Serial.print(": ");
-        Serial.println(buffer);
-        continue;
-      }
-
-      const char* method = doc["method"] | "";
-      JsonObject result = doc["result"];
-
-      const char* macRaw = result["mac"] | "";
-
-      if (strlen(macRaw) == 0) {
-        Serial.print("Received WiZ response without MAC from ");
-        Serial.print(remoteIp);
-        Serial.print(": ");
-        Serial.println(buffer);
-        continue;
-      }
-
-      String mac = normalizeMac(String(macRaw));
-
-      Serial.print("Found WiZ lamp - MAC: ");
-      Serial.print(mac);
-      Serial.print(" | IP: ");
-      Serial.print(remoteIp);
-      Serial.print(" | method: ");
-      Serial.println(method);
-
-      if (isRequestedMac(mac, macAddresses)) {
-        requestedLights[mac] = remoteIp;
-
-        Serial.print("Matched requested WiZ lamp - MAC: ");
-        Serial.print(mac);
-        Serial.print(" | IP: ");
-        Serial.println(remoteIp);
-
-        if (requestedLights.size() == macAddresses.size()) {
-          Serial.println("All requested WiZ lamps were found.");
-          return requestedLights;
-        }
-      }
-    }
-
-    delay(10);
+  if (!sendUdpJson(light.ip, json)) {
+    return false;
   }
 
-  Serial.println("WiZ discovery finished due to timeout.");
-  Serial.print("Requested lamps found: ");
-  Serial.print(requestedLights.size());
-  Serial.print("/");
-  Serial.println(macAddresses.size());
-
-  return requestedLights;
+  light.state = true;
+  light.dimming = dimming;
+  return true;
 }
