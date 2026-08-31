@@ -28,12 +28,18 @@ void applyWizPositionDelta(uint8_t nodeId, int16_t delta,
     }
 
     const int currentDimming =
-        light->dimming >= 10 ? light->dimming : AppConfig::DEFAULT_DIMMING;
-    const int targetDimming = constrain(
-        currentDimming + delta * AppConfig::DIMMING_PER_DETENT, 10, 100);
+        light->state && light->dimming >= 10 ? light->dimming : 0;
+    int targetDimming = constrain(
+        currentDimming + delta * AppConfig::DIMMING_PER_DETENT, 0, 100);
 
-    // Send even when already at the limit so turning the encoder also turns an
-    // off lamp back on without changing its color mode.
+    // WiZ supports dimming from 10 to 100. Map the otherwise unreachable gap
+    // so one negative detent from 10 turns off and one positive detent from 0
+    // turns on at 10.
+    if (targetDimming > 0 && targetDimming < 10) {
+      targetDimming = delta > 0 ? 10 : 0;
+    }
+
+    // Send even when already at a limit to keep the command behavior explicit.
     if (setWizDimming(*light, targetDimming)) {
       Serial.print("WiZ update: node=");
       Serial.print(nodeId);

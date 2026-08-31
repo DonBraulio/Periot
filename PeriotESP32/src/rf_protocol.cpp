@@ -31,7 +31,6 @@ constexpr TimingWindow SYNC_SPACE_WINDOW = {
 };
 
 constexpr uint16_t EDGE_BUFFER_SIZE = 128;
-constexpr uint32_t STATS_PERIOD_MS = 5000;
 
 struct EdgePulse {
   uint16_t durationUs;
@@ -82,7 +81,6 @@ uint8_t bitsRead = 0;
 uint16_t candidateTimings[RF_PAYLOAD_BITS * 2] = {};
 uint8_t candidateTimingCount = 0;
 uint16_t candidateSyncSpaceUs = 0;
-unsigned long lastStatsMs = 0;
 
 bool inRange(uint16_t value, uint16_t minimum, uint16_t maximum) {
   return value >= minimum && value <= maximum;
@@ -330,12 +328,6 @@ bool receiveRfFrame(RfFrame& frame) {
 }
 
 void printRfDiagnostics() {
-  const unsigned long now = millis();
-  if (now - lastStatsMs < STATS_PERIOD_MS) {
-    return;
-  }
-  lastStatsMs = now;
-
   Serial.print("RF stats: frames=");
   Serial.print(decoderStats.decodedFrames);
   Serial.print(" crc_failures=");

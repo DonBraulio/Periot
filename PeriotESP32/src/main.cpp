@@ -63,5 +63,4 @@ void loop() {
 
   updateSerialConsole();
   updateRfPositionPersistence();
-  printRfDiagnostics();
 }

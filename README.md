@@ -224,10 +224,11 @@ boot
   +--> connect to Wi-Fi
   +--> broadcast WiZ getPilot for 3 seconds
   +--> cache MAC + current IP + state + dimming
-  +--> print discovered lamps, pairings, and command help
   +--> enable the 433 MHz receiver
   |
   +--> normal loop: RF decoder + Serial console + deferred persistence
+                         |
+                         +--> print help once when a monitor attaches
 ```
 
 Discovery is intentionally completed before enabling the noisy 433 MHz input,
@@ -243,11 +244,17 @@ commands:
 ```text
 lights                         list lamps discovered during this boot
 pairs                          list persistent node-to-MAC mappings
+stats                          show cumulative RF statistics and timings
 pair <node_id> <light_index>   add a lamp to a node
 unpair <node_id> <light_index> remove a lamp from a node
 clear <node_id>                remove every lamp from a node
 help                           print the command reference
 ```
+
+The ESP32-C3 USB CDC connection state lets the firmware detect a newly opened
+monitor and print this help once per attachment. Pressing Enter on an empty line
+also prints it. There is no periodic RF output; use `stats` when diagnostics are
+needed.
 
 For example, after `lights` reports `[0]` and `[1]`, these commands make remote
 node 1 control both lamps as a group:
@@ -265,12 +272,13 @@ offline; individual `unpair` commands use the current discovered-lamp index.
 Reboot the ESP32 to repeat discovery after adding or powering on a lamp.
 
 Every received encoder detent changes brightness by five percentage points,
-including batched deltas larger than one. The target is clamped to WiZ's
-10–100 dimming range. The UDP command contains only `state=true` and `dimming`,
-so it turns an off lamp on but does not force a color, scene, or color
-temperature. The discovery value is the initial brightness baseline; later
-commands update the cached value optimistically because this prototype does not
-wait for a WiZ acknowledgement.
+including batched deltas larger than one. Logical level zero sends `state=false`
+and turns the lamp off. WiZ's positive dimming range starts at 10, so one
+positive detent from zero turns the lamp on at 10 and one negative detent from
+10 turns it off. Positive levels send only `state=true` and `dimming`, so they
+do not force a color, scene, or color temperature. The discovery value is the
+initial brightness baseline; later commands update the cached value
+optimistically because this prototype does not wait for a WiZ acknowledgement.
 
 ## RF wire protocol
 
@@ -424,11 +432,12 @@ pio device list
 7. Run `lights`, pair a discovered index with the transmitting `node_id`, then
    confirm `pairs` shows the MAC mapping.
 8. Turn in both directions and confirm brightness changes in five-point steps,
-   including a rapid turn whose RF frame has a delta larger than one.
+   reaches OFF below 10, and returns to 10 on the next positive detent. Also
+   test a rapid turn whose RF frame has a delta larger than one.
 9. Reboot the ESP32 and confirm the pairing remains while the lamp IP is
    rediscovered.
-10. While turning continuously, inspect RF timings and ensure CRC failures and
-   incomplete frames remain negligible.
+10. Run `stats` after turning continuously; inspect RF timings and ensure CRC
+   failures and incomplete frames remain negligible.
 11. `buffer_overflows` may increase because the SYN480R is noisy while idle, but
    valid frames must not cause false actions.
 
@@ -438,8 +447,8 @@ Expected serial output resembles:
 RF frame: node=1 boot_id=2 position=17 delta=+4 new_boot=no payload=0b...
 ```
 
-Periodic diagnostics include decoded frames, CRC failures, sync failures,
-invalid noise pulses, incomplete frames, buffer overflows, and accepted timing
+The `stats` command reports decoded frames, CRC failures, sync failures, invalid
+noise pulses, incomplete frames, buffer overflows, and accepted timing
 distributions.
 
 ## Current decisions and known tradeoffs

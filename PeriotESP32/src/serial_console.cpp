@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "rf_protocol.h"
 #include "wiz_pairing.h"
 
 namespace {
@@ -15,6 +16,8 @@ constexpr size_t COMMAND_BUFFER_SIZE = 96;
 WizLightList* discoveredLights = nullptr;
 char commandBuffer[COMMAND_BUFFER_SIZE] = {};
 size_t commandLength = 0;
+bool serialWasConnected = false;
+bool ignoreNextLineFeed = false;
 
 bool parseNumber(const char* token, long minimum, long maximum, long& value) {
   if (token == nullptr || *token == '\0') {
@@ -140,6 +143,7 @@ void handleClearCommand(char* nodeToken) {
 void handleCommand() {
   char* command = strtok(commandBuffer, " \t");
   if (command == nullptr) {
+    printSerialConsoleHelp();
     return;
   }
 
@@ -153,6 +157,8 @@ void handleCommand() {
     printDiscoveredWizLights();
   } else if (strcmp(command, "pairs") == 0 && firstArgument == nullptr) {
     printWizPairings();
+  } else if (strcmp(command, "stats") == 0 && firstArgument == nullptr) {
+    printRfDiagnostics();
   } else if (strcmp(command, "pair") == 0 && extraArgument == nullptr) {
     handlePairCommand(firstArgument, secondArgument);
   } else if (strcmp(command, "unpair") == 0 && extraArgument == nullptr) {
@@ -168,22 +174,32 @@ void handleCommand() {
 
 void setupSerialConsole(WizLightList& lights) {
   discoveredLights = &lights;
-  Serial.println();
-  printDiscoveredWizLights();
-  printWizPairings();
-  printSerialConsoleHelp();
+  serialWasConnected = false;
 }
 
 void updateSerialConsole() {
+  const bool serialConnected = static_cast<bool>(Serial);
+  if (serialConnected && !serialWasConnected) {
+    Serial.println();
+    printSerialConsoleHelp();
+  }
+  serialWasConnected = serialConnected;
+
   while (Serial.available() > 0) {
     const char character = static_cast<char>(Serial.read());
 
+    if (character == '\n' && ignoreNextLineFeed) {
+      ignoreNextLineFeed = false;
+      continue;
+    }
     if (character == '\r' || character == '\n') {
       commandBuffer[commandLength] = '\0';
       handleCommand();
       commandLength = 0;
+      ignoreNextLineFeed = character == '\r';
       continue;
     }
+    ignoreNextLineFeed = false;
     if (character == '\b' || character == 0x7F) {
       if (commandLength > 0) {
         --commandLength;
@@ -204,6 +220,7 @@ void printSerialConsoleHelp() {
   Serial.println("Serial pairing commands:");
   Serial.println("  lights                         list boot-discovered lamps");
   Serial.println("  pairs                          list persistent mappings");
+  Serial.println("  stats                          show cumulative RF statistics");
   Serial.println("  pair <node_id> <light_index>   add a lamp to a node");
   Serial.println("  unpair <node_id> <light_index> remove a lamp from a node");
   Serial.println("  clear <node_id>                remove every lamp from a node");

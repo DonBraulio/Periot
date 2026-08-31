@@ -165,6 +165,17 @@ const WizLight* findWizLightByMac(const WizLightList& lights,
 }
 
 bool setWizDimming(WizLight& light, int dimming) {
+  if (dimming <= 0) {
+    static const char offJson[] =
+        "{\"method\":\"setPilot\",\"params\":{\"state\":false}}";
+    if (!sendUdpJson(light.ip, offJson)) {
+      return false;
+    }
+
+    light.state = false;
+    return true;
+  }
+
   dimming = constrain(dimming, 10, 100);
 
   char json[112];

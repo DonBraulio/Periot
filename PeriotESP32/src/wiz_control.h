@@ -21,6 +21,6 @@ WizLight* findWizLightByMac(WizLightList& lights, const String& mac);
 const WizLight* findWizLightByMac(const WizLightList& lights,
                                  const String& mac);
 
-// Turns the lamp on at the requested brightness without changing its current
-// color, scene, or color temperature. Brightness is clamped to 10..100.
+// Level zero turns the lamp off. A positive level turns it on without changing
+// its color mode and is clamped to the WiZ dimming range of 10..100.
 bool setWizDimming(WizLight& light, int dimming);
